@@ -10,8 +10,9 @@ dipakai**, walaupun harga yang ditampilkan bisa harga pasar sungguhan.
 
 | File | Fungsi |
 |---|---|
-| `bot.py` | Logic trading (indikator, deteksi regime, akun simulasi) + versi CLI |
-| `gui.py` | Tampilan GUI ala terminal trading (chart candlestick, angka modal/untung-rugi) |
+| `bot.py` | Logic trading (indikator, deteksi regime, risk management, akun simulasi) + versi CLI |
+| `gui.py` | Tampilan GUI ala terminal trading (chart candlestick, angka modal/untung-rugi, export laporan) |
+| `backtest.py` | Uji strategi di data historis asli (in-sample vs out-of-sample) |
 | `requirements.txt` | Dependency (`ccxt`, untuk ambil data harga dari exchange) |
 | `trades.csv` | Log semua transaksi simulasi (dibuat otomatis saat pertama kali ada transaksi) |
 
@@ -124,12 +125,14 @@ Ini bagian yang sengaja belum diimplementasikan otomatis karena menyangkut
 uang asli -- minta dibuatkan kalau kamu sudah sampai tahap ini:
 
 1. Autentikasi `ccxt` pakai API key/secret dari environment variable.
-2. Ganti `account.execute()` (simulasi lokal) dengan
+2. Ganti `PaperAccount.buy()`/`.sell()` (simulasi lokal) dengan
    `exchange.create_market_buy_order(...)` / `create_market_sell_order(...)`
-   (order asli).
-3. Handle minimum order size, fee, dan slippage sesuai aturan exchange.
-4. Risk control minimum: batas kerugian harian (daily loss limit), ukuran
-   posisi maksimum per trade, dan stop-loss otomatis.
+   (order asli) -- stop-loss/take-profit ATR-nya bisa jadi `create_order`
+   bertipe stop/limit di exchange, bukan cuma dicek tiap tick di kode.
+3. Handle minimum order size (lot size) exchange -- fee & slippage sudah
+   disimulasikan, tapi realita exchange bisa beda persis.
+4. Risk control tambahan: batas kerugian harian (daily loss limit) di atas
+   yang sudah ada (risk per trade, cooldown).
 5. Logging & alert kalau bot error atau koneksi putus di tengah posisi terbuka.
 
 ### F. Sebelum benar-benar live
@@ -144,9 +147,56 @@ uang asli -- minta dibuatkan kalau kamu sudah sampai tahap ini:
 
 ## Catatan strategi
 
-- **Trending** (ADX > 25): sinyal BELI saat SMA cepat (9) memotong ke atas
-  SMA lambat (21), sinyal JUAL saat sebaliknya.
-- **Sideways** (ADX <= 25): sinyal BELI saat RSI < 30 (oversold), JUAL saat
-  RSI > 70 (overbought).
-- Parameter (`SMA_FAST`, `SMA_SLOW`, `RSI_PERIOD`, `ADX_TREND_THRESHOLD`, dll)
-  ada di bagian atas `bot.py` kalau mau dieksperimenkan.
+**Deteksi kondisi pasar**
+- **Trending** (ADX > 20): sinyal BELI saat SMA9 di atas SMA21, JUAL saat sebaliknya.
+- **Sideways** (ADX <= 20): mean-reversion pakai Bollinger Band -- BELI saat
+  harga di batas bawah band **dan** RSI < 40 (oversold), JUAL saat harga di
+  batas atas band **dan** RSI > 60 (overbought).
+
+**Filter sebelum entry** (BELI diblokir kalau salah satu gagal, JUAL/keluar posisi tidak pernah diblokir):
+- Volatilitas: ATR harus >= `MIN_ATR_PCT` dari harga -- skip kalau pasar terlalu sepi.
+- Tren jangka panjang: harga harus di atas SMA50 (macro filter).
+- Timeframe lebih besar (mode live saja): harga 1h harus di atas EMA50 1h,
+  dicek ulang tiap ~30 tick supaya tidak membanjiri API exchange.
+- Target realistis: target profit (dari ATR) harus >= 3x biaya round-trip
+  (fee + slippage kedua sisi) -- kalau tidak, potensi untungnya habis kena biaya.
+
+**Exit & risk management**
+- Stop-loss berbasis ATR (`entry - 1.2x ATR`), take-profit `2x` jarak stop.
+- Begitu profit mencapai 1x risiko, stop otomatis digeser ke breakeven (trailing).
+- Ukuran posisi dihitung dari risiko: `(equity x 1%) / jarak_stop` -- sinyal
+  "lemah" (ADX di bawah 30 atau volume tidak terkonfirmasi) dapat setengah ukuran.
+- Fee 0.1% dan slippage ~0.03% disimulasikan di setiap beli/jual.
+- Setelah kena stop-loss, ada cooldown 5 candle sebelum boleh entry baru lagi.
+
+Parameter-parameter ini (`ADX_TREND_THRESHOLD`, `ATR_STOP_MULT`,
+`RISK_PER_TRADE_PCT`, `COOLDOWN_CANDLES`, dll) ada di bagian atas `bot.py`
+kalau mau dieksperimenkan.
+
+## 4. Mengukur performa & akurasi bot
+
+### Laporan dari GUI
+
+Tombol **⬇ EXPORT LAPORAN** (di panel Market Watch) menyimpan laporan HTML
+berisi grafik equity, win rate, **expectancy per trade**, **profit factor**,
+**max drawdown**, rata-rata untung/rugi, dan riwayat transaksi lengkap
+beserta alasan tiap entry -- semuanya dari sesi yang sedang berjalan.
+
+### Backtest di data historis asli
+
+```bash
+python backtest.py --days 60                          # BTC/USDT, timeframe default
+python backtest.py --days 90 --symbol ETH/USDT --timeframe 1h
+python backtest.py --test                              # self-check tanpa jaringan
+```
+
+Data historis diambil dari exchange, dibagi dua: paruh pertama (in-sample)
+dan paruh kedua (out-of-sample), lalu strategi yang SAMA dijalankan di
+kedua paruh dan hasilnya dibandingkan. Ini **bukan** walk-forward
+optimization otomatis (tidak ada pencarian parameter) -- kalau kamu mau
+optimasi parameter otomatis, itu fitur terpisah yang lebih besar, minta
+dibuatkan kalau sudah sampai tahap itu.
+
+Kalau hasil paruh pertama jauh lebih bagus dari paruh kedua, itu tanda
+strategi/parameter kemungkinan overfit ke satu kondisi pasar saja -- jangan
+langsung percaya angka backtest dari satu periode pendek.
