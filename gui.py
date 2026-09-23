@@ -16,7 +16,9 @@ import os
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from datetime import datetime, timezone
+from tkinter import filedialog, messagebox
 
 import bot
 
@@ -63,22 +65,24 @@ def panel(parent, title, **pack_opts):
     return body
 
 
-def trade_stats():
-    """Win rate + counts from the full trade log (paired buy->sell round trips)."""
-    path = bot.TRADE_LOG
-    if not os.path.exists(path):
-        return dict(total=0, buys=0, sells=0, wins=0, round_trips=0)
-    with open(path) as f:
-        rows = list(csv.reader(f))[1:]
-    buys = [r for r in rows if r[1] == "buy"]
-    sells = [r for r in rows if r[1] == "sell"]
-    wins = 0
-    for i in range(min(len(buys), len(sells))):
-        if float(sells[i][2]) > float(buys[i][2]):
-            wins += 1
-    round_trips = min(len(buys), len(sells))
-    return dict(total=len(rows), buys=len(buys), sells=len(sells),
-                wins=wins, round_trips=round_trips)
+def svg_polyline(points, w, h, pad=10):
+    """Minimal inline SVG line chart -- no plotting library needed for a report."""
+    if len(points) < 2:
+        return f'<svg width="{w}" height="{h}"><text x="10" y="20" fill="#5a6472">Belum cukup data.</text></svg>'
+    lo, hi = min(points), max(points)
+    if hi == lo:
+        hi = lo + 1
+    coords = []
+    for i, v in enumerate(points):
+        x = pad + i / (len(points) - 1) * (w - 2 * pad)
+        y = h - pad - (v - lo) / (hi - lo) * (h - 2 * pad)
+        coords.append(f"{x:.1f},{y:.1f}")
+    color = "#26d07c" if points[-1] >= points[0] else "#ff4d5e"
+    return (f'<svg width="{w}" height="{h}" style="background:#0a0d13;border-radius:8px">'
+            f'<polyline points="{" ".join(coords)}" fill="none" stroke="{color}" stroke-width="2"/>'
+            f'<text x="{pad}" y="16" fill="#5a6472" font-size="11" font-family="Consolas">{hi:,.2f}</text>'
+            f'<text x="{pad}" y="{h-4}" fill="#5a6472" font-size="11" font-family="Consolas">{lo:,.2f}</text>'
+            f'</svg>')
 
 
 class MockTicker:
@@ -194,6 +198,10 @@ class TerminalGUI(tk.Tk):
         self.live_dot.pack(side="right", padx=10)
         self.uptime_lbl = tk.Label(strip_row, text="uptime 00:00:00", bg=PANEL, fg=DIM, font=FONT_SM)
         self.uptime_lbl.pack(side="right", padx=10)
+        export_btn = tk.Button(strip_row, text="⬇ EXPORT LAPORAN", command=self.export_report,
+                                bg=NEON_CYAN, fg="#05070a", font=FONT_SM, relief="flat",
+                                activebackground=NEON_MAGENTA, cursor="hand2")
+        export_btn.pack(side="right", padx=10, ipady=2)
 
         acc_body = panel(self, f"AKUN -- {bot.SYMBOL}", fill="x", padx=14, pady=4)
         top = tk.Frame(acc_body, bg=PANEL)
@@ -239,6 +247,8 @@ class TerminalGUI(tk.Tk):
         ind_body = panel(side_col, "INDIKATOR", fill="x")
         self.gauge_rsi = self._build_gauge(ind_body, "RSI (14)")
         self.gauge_adx = self._build_gauge(ind_body, "ADX (14)")
+        self.lbl_atr = tk.Label(ind_body, text="ATR: --", bg=PANEL, fg=DIM, font=FONT_SM, anchor="w")
+        self.lbl_atr.pack(fill="x", padx=10, pady=(0, 4))
         self.lbl_sma = tk.Label(ind_body, text="SMA9 vs SMA21: --", bg=PANEL, fg=FG,
                                  font=FONT_SM, anchor="w", justify="left")
         self.lbl_sma.pack(fill="x", padx=10, pady=(4, 10))
@@ -251,6 +261,13 @@ class TerminalGUI(tk.Tk):
         self.lbl_stats = tk.Label(stats_body, text="", bg=PANEL, fg=FG, font=FONT_SM,
                                    justify="left", anchor="w")
         self.lbl_stats.pack(fill="x", padx=10, pady=8)
+
+        botlog_body = panel(self, "CATATAN BOT", fill="both", expand=True, padx=14, pady=(4, 4))
+        self.botlog = tk.Text(botlog_body, bg=PANEL, fg=FG, font=FONT, height=6, borderwidth=0,
+                               highlightthickness=0, state="disabled", wrap="word")
+        self.botlog.pack(fill="both", expand=True, padx=10, pady=8)
+        for tag, color in (("buy", GREEN), ("sell", RED), ("hold", YELLOW)):
+            self.botlog.tag_configure(tag, foreground=color)
 
         log_body = panel(self, "RIWAYAT TRANSAKSI", fill="both", expand=True, padx=14, pady=(4, 6))
         self.log = tk.Text(log_body, bg=PANEL, fg=FG, font=FONT, height=8, borderwidth=0,
@@ -268,6 +285,93 @@ class TerminalGUI(tk.Tk):
         c = tk.Canvas(parent, bg=PANEL, height=22, highlightthickness=0)
         c.pack(fill="x", padx=10, pady=(2, 4))
         return c
+
+    def export_report(self):
+        """Save a self-contained HTML report: equity chart + stats + full trade log."""
+        if not self.session:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Simpan laporan performa bot",
+            defaultextension=".html",
+            filetypes=[("HTML report", "*.html")],
+            initialfile=f"laporan_bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+        )
+        if not path:
+            return
+        try:
+            html = self.build_report_html()
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+        except Exception as e:
+            messagebox.showerror("Gagal export", str(e))
+            return
+        if messagebox.askyesno("Laporan tersimpan", f"Laporan disimpan ke:\n{path}\n\nBuka sekarang?"):
+            webbrowser.open(f"file://{os.path.abspath(path)}")
+
+    def build_report_html(self):
+        account = self.session.account
+        price = self.session.history[-1][4] if self.session.history else 0.0
+        equity = account.equity(price)
+        deposit = self.deposit
+        pnl = equity - deposit
+        pnl_pct = (pnl / deposit * 100) if deposit else 0
+        pnl_color = "#26d07c" if pnl >= 0 else "#ff4d5e"
+        rows = self.session.trades
+        stats = bot.analyze_trades(rows, equity_curve=self.equity_history)
+
+        row_tpl = ("<tr><td>{ts}</td><td style='color:{color}'>{label}</td><td>${px:,.2f}</td>"
+                   "<td>${cash:,.2f}</td><td>{pos:.8f}</td><td>${eq:,.2f}</td><td>{reason}</td></tr>")
+        rows_html = "".join(
+            row_tpl.format(ts=ts[:19], color="#26d07c" if side == "buy" else "#ff4d5e",
+                          label="BELI" if side == "buy" else "JUAL", px=px, cash=cash, pos=pos, eq=eq,
+                          reason=info.get("reason", ""))
+            for ts, side, px, cash, pos, eq, info in rows
+        ) or "<tr><td colspan='7' style='color:#5a6472'>Belum ada transaksi</td></tr>"
+
+        equity_points = self.equity_history if len(self.equity_history) >= 2 else [deposit, equity]
+        pf_display = "∞" if stats["profit_factor"] == float("inf") else f"{stats['profit_factor']:.2f}"
+
+        return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Laporan Performa Bot -- {bot.SYMBOL}</title>
+<style>
+body {{ background:#05070a; color:#c9d1d9; font-family:Consolas,monospace; padding:24px; }}
+h1 {{ color:#00e5ff; }}
+.stats {{ display:flex; gap:32px; flex-wrap:wrap; margin:20px 0; }}
+.stat {{ background:#0a0d13; border:1px solid #1c2430; border-radius:8px; padding:14px 20px; }}
+.stat .label {{ color:#5a6472; font-size:12px; }}
+.stat .value {{ font-size:20px; font-weight:bold; }}
+table {{ border-collapse:collapse; width:100%; margin-top:12px; }}
+th, td {{ border-bottom:1px solid #1c2430; padding:6px 10px; text-align:left; font-size:13px; }}
+th {{ color:#5a6472; }}
+</style></head><body>
+<h1>Laporan Performa -- Adaptive Paper Trader</h1>
+<p style="color:#5a6472">Dibuat: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} &nbsp;|&nbsp;
+Sumber data: {self.session.exchange_id} &nbsp;|&nbsp; Simbol: {bot.SYMBOL}</p>
+
+<div class="stats">
+  <div class="stat"><div class="label">MODAL AWAL</div><div class="value">${deposit:,.2f}</div></div>
+  <div class="stat"><div class="label">SEKARANG JADI</div><div class="value" style="color:#00e5ff">${equity:,.2f}</div></div>
+  <div class="stat"><div class="label">UNTUNG / RUGI</div><div class="value" style="color:{pnl_color}">${pnl:,.2f} ({pnl_pct:+.2f}%)</div></div>
+  <div class="stat"><div class="label">TOTAL TRANSAKSI</div><div class="value">{stats['total']}</div></div>
+  <div class="stat"><div class="label">BELI / JUAL</div><div class="value">{stats['buys']} / {stats['sells']}</div></div>
+  <div class="stat"><div class="label">WIN RATE</div><div class="value">{stats['win_rate']:.0f}%</div></div>
+  <div class="stat"><div class="label">EXPECTANCY / TRADE</div><div class="value">${stats['expectancy']:,.2f}</div></div>
+  <div class="stat"><div class="label">PROFIT FACTOR</div><div class="value">{pf_display}</div></div>
+  <div class="stat"><div class="label">MAX DRAWDOWN</div><div class="value" style="color:#ff4d5e">{stats['max_drawdown_pct']:.1f}%</div></div>
+  <div class="stat"><div class="label">RATA2 MENANG / KALAH</div><div class="value">${stats['avg_win']:,.2f} / ${stats['avg_loss']:,.2f}</div></div>
+</div>
+
+<h2>Grafik Modal (Equity)</h2>
+{svg_polyline(equity_points, 900, 220)}
+
+<h2>Riwayat Transaksi Lengkap</h2>
+<table>
+<tr><th>Waktu</th><th>Aksi</th><th>Harga</th><th>Cash</th><th>Posisi</th><th>Equity</th><th>Alasan</th></tr>
+{rows_html}
+</table>
+
+<p style="color:#5a6472;margin-top:24px">Catatan: seluruh transaksi di laporan ini adalah SIMULASI (paper trading), bukan transaksi uang asli.</p>
+</body></html>"""
 
     def blink_live(self):
         if self.session:
@@ -293,9 +397,10 @@ class TerminalGUI(tk.Tk):
             self.after(0, self._on_tick_err, e)
 
     def _on_tick_ok(self, result):
-        price, regime, signal = result
+        price, regime, signal, reason = result
         self.tick_count += 1
         self.render(price, regime, signal)
+        self.append_botlog(signal, reason)
         self.status.config(
             text=f"sumber: {self.session.exchange_id}  |  {bot.SYMBOL}  |  update tiap {self.session.poll_seconds}s")
         self.after(self.session.poll_seconds * 1000, self.tick)
@@ -303,6 +408,18 @@ class TerminalGUI(tk.Tk):
     def _on_tick_err(self, e):
         self.status.config(text=f"error: {e}")
         self.after(self.session.poll_seconds * 1000, self.tick)
+
+    def append_botlog(self, signal, reason):
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        label = SIGNAL_LABEL.get(signal, signal)
+        tag = signal if signal in ("buy", "sell") else "hold"
+        self.botlog.config(state="normal")
+        self.botlog.insert("end", f"[{ts}] {label}: {reason}\n", tag)
+        line_count = int(self.botlog.index("end-1c").split(".")[0])
+        if line_count > 300:
+            self.botlog.delete("1.0", f"{line_count - 300}.0")
+        self.botlog.see("end")
+        self.botlog.config(state="disabled")
 
     # ---- chart: price axis on the right, dashed last-price line, volume ---
     def draw_chart(self):
@@ -435,21 +552,42 @@ class TerminalGUI(tk.Tk):
 
         rsi_val = bot.rsi(closes, bot.RSI_PERIOD) or 50.0
         adx_val = bot.adx(highs, lows, closes, bot.ADX_PERIOD) or 0.0
-        self.draw_gauge(self.gauge_rsi, rsi_val, 100, 30, 70)
+        atr_val = bot.atr(highs, lows, closes, bot.ATR_PERIOD)
+        self.draw_gauge(self.gauge_rsi, rsi_val, 100, bot.RSI_OVERSOLD, bot.RSI_OVERBOUGHT)
         self.draw_gauge(self.gauge_adx, adx_val, 50, 100, bot.ADX_TREND_THRESHOLD)
+        if atr_val:
+            atr_pct = atr_val / price * 100
+            ok = atr_pct >= bot.MIN_ATR_PCT * 100
+            self.lbl_atr.config(text=f"ATR: {atr_val:,.1f} ({atr_pct:.2f}% dari harga) "
+                                f"{'OK' if ok else '-- terlalu sepi, entry di-skip'}",
+                                fg=FG if ok else RED)
         sma_f, sma_s = bot.sma(closes, bot.SMA_FAST), bot.sma(closes, bot.SMA_SLOW)
+        long_ma = bot.sma(closes, bot.LONG_MA_PERIOD)
         if sma_f and sma_s:
             trend = "BULLISH" if sma_f > sma_s else "BEARISH"
-            self.lbl_sma.config(text=f"SMA9 {sma_f:,.1f}  vs  SMA21 {sma_s:,.1f}\n-> {trend}",
+            macro = ""
+            if long_ma:
+                macro_ok = price > long_ma
+                macro = f"\nSMA{bot.LONG_MA_PERIOD} (jangka panjang): {'NAIK' if macro_ok else 'TURUN'}"
+            self.lbl_sma.config(text=f"SMA9 {sma_f:,.1f}  vs  SMA21 {sma_s:,.1f}\n-> {trend}{macro}",
                                  fg=GREEN if trend == "BULLISH" else RED)
 
-        stats = trade_stats()
-        wr = (stats["wins"] / stats["round_trips"] * 100) if stats["round_trips"] else 0.0
+        stats = bot.analyze_trades(self.session.trades, equity_curve=self.equity_history)
+        pf_display = "∞" if stats["profit_factor"] == float("inf") else f"{stats['profit_factor']:.2f}"
+        account_pos = self.session.account
+        cooldown_line = (f"Cooldown        : {self.session.cooldown_remaining} candle\n"
+                         if self.session.cooldown_remaining > 0 else "")
+        stop_tp_line = (f"Stop / TP       : ${account_pos.stop_price:,.0f} / ${account_pos.target_price:,.0f}\n"
+                        if account_pos.stop_price else "")
         self.lbl_stats.config(text=(
             f"Total transaksi : {stats['total']}\n"
             f"Beli / Jual      : {stats['buys']} / {stats['sells']}\n"
             f"Round-trip       : {stats['round_trips']}\n"
-            f"Win rate         : {wr:.0f}%\n"
+            f"Win rate         : {stats['win_rate']:.0f}%\n"
+            f"Expectancy       : ${stats['expectancy']:,.2f}\n"
+            f"Profit factor    : {pf_display}\n"
+            f"Max drawdown     : {stats['max_drawdown_pct']:.1f}%\n"
+            f"{stop_tp_line}{cooldown_line}"
             f"Jumlah tick      : {self.tick_count}"
         ))
 
@@ -478,12 +616,12 @@ class TerminalGUI(tk.Tk):
 
         self.log.config(state="normal")
         self.log.delete("1.0", "end")
-        rows = bot.recent_trade_lines(bot.MAX_LOG_LINES)
+        rows = self.session.trades[-bot.MAX_LOG_LINES:]
         if not rows:
             self.log.insert("end", "  (belum ada transaksi)\n", "dim")
-        for ts, side, px, cash, pos, eq in rows:
+        for ts, side, px, cash, pos, eq, info in rows:
             label = "BELI" if side == "buy" else "JUAL"
-            self.log.insert("end", f"  {ts[:19]}  {label:<5}  harga=${float(px):,.2f}  saldo jadi=${float(eq):,.2f}\n",
+            self.log.insert("end", f"  {ts[:19]}  {label:<5}  harga=${px:,.2f}  saldo jadi=${eq:,.2f}\n",
                             "buy" if side == "buy" else "sell")
         self.log.config(state="disabled")
 
